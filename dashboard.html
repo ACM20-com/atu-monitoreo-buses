@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATU - Monitor de Buses en Tiempo Real</title>
+    <link rel="stylesheet" href="leaflet/leaflet.css"/>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; }
+
+        header {
+            background: linear-gradient(135deg, #e63946, #457b9d);
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+        }
+        header h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: 1px; }
+        header .badge {
+            background: rgba(255,255,255,0.2);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+        }
+
+        #mapa { height: calc(100vh - 110px); width: 100%; }
+
+        #panel {
+            position: fixed;
+            top: 70px;
+            right: 12px;
+            background: rgba(20,20,40,0.92);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 14px;
+            min-width: 220px;
+            z-index: 1000;
+            backdrop-filter: blur(6px);
+        }
+        #panel h3 { color: #e63946; margin-bottom: 10px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; }
+        #lista-buses { max-height: 300px; overflow-y: auto; }
+        .bus-item {
+            background: rgba(255,255,255,0.05);
+            border-left: 3px solid #e63946;
+            margin: 5px 0;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 0.82rem;
+        }
+        .bus-item .bus-id { font-weight: bold; color: #ffd166; }
+        .bus-item .bus-coords { color: #aaa; font-size: 0.75rem; }
+
+        #status-bar {
+            position: fixed;
+            bottom: 0;
+            width: 100%;
+            background: rgba(10,10,25,0.9);
+            padding: 6px 16px;
+            display: flex;
+            gap: 20px;
+            font-size: 0.8rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            z-index: 1000;
+        }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: #2ecc71; display: inline-block; animation: pulse 1.5s infinite; }
+        .dot.error { background: #e63946; animation: none; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+        .bus-icon {
+            background: #e63946;
+            border: 2px solid white;
+            border-radius: 50%;
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>🚌 ATU — Monitor de Buses Lima/Callao</h1>
+    <span class="badge" id="contador">0 buses activos</span>
+    <a href="dashboard2.html" style="color:#fff;text-decoration:none;background:rgba(255,255,255,0.2);padding:6px 14px;border-radius:6px;font-size:0.85rem;border:1px solid rgba(255,255,255,0.4);">Panel de control</a>
+</header>
+
+<div id="mapa"></div>
+
+<div id="panel">
+    <h3>🗂 Buses Activos</h3>
+    <div id="lista-buses"><em style="color:#aaa;font-size:0.8rem">Esperando datos...</em></div>
+</div>
+
+<div id="status-bar">
+    <span><span class="dot" id="dot"></span> <span id="estado">Conectando...</span></span>
+    <span>Actualización: cada 3s</span>
+    <span>Endpoint: <code id="endpoint-txt"></code></span>
+    <span id="ultima-act"></span>
+</div>
+
+<script src="leaflet/leaflet.js"></script>
+<script>
+    // Mapa centrado en Lima/Callao
+    const mapa = L.map('mapa').setView([-12.0464, -77.0428], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors | ATU Lima',
+        maxZoom: 18
+    }).addTo(mapa);
+
+    // Marcador del centro de Lima para referencia
+    L.marker([-12.0464, -77.0428], {
+        icon: L.divIcon({ html: '🏛️', className: '', iconSize: [24,24] })
+    }).addTo(mapa).bindPopup('<b>Plaza Mayor de Lima</b>');
+
+    // ---- Rutas fijas de los 3 corredores ATU (mismas coordenadas que usan los BusCliente) ----
+    const RUTAS_CORREDOR = {
+        ROJO: [
+            [-12.0931, -77.0531], [-12.0920, -77.0510], [-12.0908, -77.0488],
+            [-12.0895, -77.0462], [-12.0880, -77.0435], [-12.0865, -77.0405],
+            [-12.0850, -77.0375], [-12.0835, -77.0345], [-12.0820, -77.0315],
+            [-12.0805, -77.0285], [-12.0795, -77.0260], [-12.0780, -77.0235]
+        ],
+        AZUL: [
+            [-11.9950, -77.0830], [-11.9980, -77.0815], [-12.0010, -77.0800],
+            [-12.0040, -77.0785], [-12.0070, -77.0770], [-12.0100, -77.0755],
+            [-12.0130, -77.0740], [-12.0160, -77.0725], [-12.0190, -77.0710],
+            [-12.0220, -77.0695], [-12.0250, -77.0680], [-12.0280, -77.0665]
+        ],
+        AMARILLO: [
+            [-11.9700, -77.0580], [-11.9730, -77.0590], [-11.9760, -77.0600],
+            [-11.9790, -77.0610], [-11.9820, -77.0620], [-11.9850, -77.0630],
+            [-11.9880, -77.0640], [-11.9910, -77.0650], [-11.9940, -77.0660],
+            [-11.9970, -77.0670], [-12.0000, -77.0680], [-12.0030, -77.0690]
+        ]
+    };
+
+    // Colores fijos por corredor (no por hash) — así el color siempre coincide con la ruta real
+    const COLOR_CORREDOR = {
+        ROJO: '#e63946',
+        AZUL: '#2196F3',
+        AMARILLO: '#FFC107'
+    };
+
+    // Dibuja cada corredor como línea punteada, una sola vez al cargar el mapa
+    Object.keys(RUTAS_CORREDOR).forEach(nombre => {
+        L.polyline(RUTAS_CORREDOR[nombre], {
+            color: COLOR_CORREDOR[nombre],
+            weight: 4,
+            opacity: 0.55,
+            dashArray: '8, 10'
+        }).addTo(mapa).bindPopup(`<b>Corredor ${nombre}</b>`);
+
+        // Paraderos (cada punto de la ruta) como círculos pequeños
+        RUTAS_CORREDOR[nombre].forEach((punto, i) => {
+            L.circleMarker(punto, {
+                radius: 4,
+                color: COLOR_CORREDOR[nombre],
+                fillColor: '#fff',
+                fillOpacity: 0.9,
+                weight: 2
+            }).addTo(mapa).bindPopup(`Paradero ${i + 1} — Corredor ${nombre}`);
+        });
+    });
+
+    const marcadores = {};
+    const trayectorias = {};
+
+    function colorBus(corredor) {
+        return COLOR_CORREDOR[corredor] || '#9C27B0';
+    }
+
+    function iconoBus(idBus, color) {
+        return L.divIcon({
+            html: `<div style="background:${color};border:2px solid white;border-radius:50%;
+                   width:30px;height:30px;display:flex;align-items:center;justify-content:center;
+                   font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.5);">🚌</div>`,
+            className: '',
+            iconSize: [30, 30],
+            iconAnchor: [15, 15]
+        });
+    }
+
+    // Endpoint dinámico: usa el mismo host desde el que se sirve el dashboard,
+    // así funciona sin importar en qué máquina/IP se ejecute (antes estaba fijo a la IP de Jimy)
+    const ENDPOINT = `http://${window.location.hostname}:8080/buses`;
+    document.getElementById('endpoint-txt').textContent = ENDPOINT;
+
+    function actualizarMapa() {
+        fetch(ENDPOINT)
+            .then(r => {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
+            .then(buses => {
+                const dot = document.getElementById('dot');
+                dot.classList.remove('error');
+                document.getElementById('estado').textContent = 'Conectado — ' + buses.length + ' registros';
+                document.getElementById('contador').textContent = buses.length + ' buses activos';
+                document.getElementById('ultima-act').textContent = 'Última actualización: ' + new Date().toLocaleTimeString();
+
+                let listaHTML = '';
+
+                buses.forEach(bus => {
+                    const lat = parseFloat(bus.latitud);
+                    const lon = parseFloat(bus.longitud);
+                    const corredor = bus.corredor || 'ROJO';
+                    const color = colorBus(corredor);
+
+                    if (marcadores[bus.id_bus]) {
+                        marcadores[bus.id_bus].setLatLng([lat, lon]);
+                    } else {
+                        marcadores[bus.id_bus] = L.marker([lat, lon], {
+                            icon: iconoBus(bus.id_bus, color)
+                        }).addTo(mapa)
+                          .bindPopup(`<b>${bus.id_bus}</b><br>Corredor: ${corredor}<br>Lat: ${lat.toFixed(5)}<br>Lon: ${lon.toFixed(5)}<br>${bus.timestamp}`);
+
+                        // Trayectoria (estela reciente del bus, en el color de su corredor)
+                        trayectorias[bus.id_bus] = L.polyline([[lat, lon]], {
+                            color: color, weight: 3, opacity: 0.8
+                        }).addTo(mapa);
+                    }
+
+                    // Agregar punto a trayectoria (máximo 20 puntos)
+                    const pts = trayectorias[bus.id_bus].getLatLngs();
+                    pts.push([lat, lon]);
+                    if (pts.length > 20) pts.shift();
+                    trayectorias[bus.id_bus].setLatLngs(pts);
+
+                    listaHTML += `<div class="bus-item" style="border-left-color:${color}">
+                        <div class="bus-id">🚌 ${bus.id_bus} <span style="color:${color};font-size:0.75rem">● ${corredor}</span></div>
+                        <div class="bus-coords">Lat: ${lat.toFixed(5)} | Lon: ${lon.toFixed(5)}</div>
+                        <div class="bus-coords">${bus.timestamp}</div>
+                    </div>`;
+                });
+
+                document.getElementById('lista-buses').innerHTML = listaHTML || '<em style="color:#aaa;font-size:0.8rem">Sin buses activos</em>';
+            })
+            .catch(err => {
+                const dot = document.getElementById('dot');
+                dot.classList.add('error');
+                document.getElementById('estado').textContent = 'Error: ' + err.message;
+            });
+    }
+
+    // Primera actualización inmediata y luego cada 3 segundos
+    actualizarMapa();
+    setInterval(actualizarMapa, 3000);
+</script>
+</body>
+</html>
